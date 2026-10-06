@@ -1,0 +1,672 @@
+(() => {
+  "use strict";
+
+  /* ======================= SETTINGS ======================= */
+  const V = 24;               // rover voltage (volts) — the same every day
+  const MAX_SOLS = 10;
+  const START_CREDITS = 400;
+  const START_LIVES = 3;
+  const TOLERANCE = 0.02;     // answers within 2% are accepted
+
+  // Extra science tasks (power in watts).
+  const SCIENCE = [
+    { name: "Drive",                 desc: "Drive to the next place to explore.",       min: 120, max: 240 },
+    { name: "Drill a rock",          desc: "Drill out a rock sample.",                  min: 96,  max: 192 },
+    { name: "Send data to Earth",    desc: "Beam today's results home.",                min: 48,  max: 96  },
+    { name: "Laser rock scanner",    desc: "Find out what a rock is made of.",          min: 36,  max: 72  },
+    { name: "Panorama photos",       desc: "Take photos all the way around.",           min: 24,  max: 48  },
+    { name: "Heat a soil sample",    desc: "Bake soil to see what gases come out.",     min: 84,  max: 156 },
+    { name: "Underground radar",     desc: "Look at the layers under the ground.",      min: 36,  max: 72  },
+    { name: "Close-up camera",       desc: "Photograph tiny grains of sand.",           min: 24,  max: 48  },
+    { name: "Weather check",         desc: "Measure wind and dust levels.",             min: 12,  max: 36  }
+  ];
+  // Jobs that must run every day.
+  const ESSENTIAL = [
+    { name: "Heaters",  desc: "Stop the rover's parts from freezing.", min: 36, max: 84 },
+    { name: "Computer", desc: "The rover's brain must stay switched on.", min: 24, max: 48 }
+  ];
+
+  /* ======================= HELPERS ======================= */
+  const $ = id => document.getElementById(id);
+  const randInt = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+  const randStep = (min, max, step) => +(min + step * randInt(0, Math.floor((max - min) / step + 1e-9))).toFixed(4);
+  const shuffle = arr => { for (let i = arr.length - 1; i > 0; i--) { const j = randInt(0, i); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; };
+  const fmt = (x, d = 2) => (+x.toFixed(d)).toString();
+
+  /* ======================= STATE ======================= */
+  let state;   // { sol, credits, lives, science, over, training }
+  let today;   // the current day's conditions
+
+  /* ======================= MAKING A NEW DAY ======================= */
+  // Numbers are random but chosen so the answers come out tidy.
+  function generateSol(n) {
+    const step = n <= 4 ? 12 : 6;   // 12 W steps give currents in 0.5 A steps; 6 W steps give 0.25 A
+    const pool = shuffle(SCIENCE.slice());
+    const tasks = [];
+    const make = (t, req, reward) => ({ ...t, P: randStep(t.min, t.max, step), req, reward, checked: false, showKW: false });
+
+    ESSENTIAL.forEach(t => tasks.push(make(t, true, 0)));
+    if (n >= 4) tasks.push(make(pool.pop(), true, 40)); // a must-do science task from day 4
+    const nOptional = n <= 2 ? 2 : n <= 5 ? 3 : 4;
+    for (let i = 0; i < nOptional; i++) tasks.push(make(pool.pop(), false, 5 * randInt(4, 20)));
+
+    // From day 8 some powers are shown in kW (unit-change practice).
+    if (n >= 8) tasks.forEach(t => { t.showKW = Math.random() < 0.4; });
+
+    // Wire resistance goes up as the dust gets worse.
+    const R = n <= 2 ? randStep(0.10, 0.40, 0.05) : n <= 5 ? randStep(0.20, 0.90, 0.05) : randStep(0.40, 1.40, 0.05);
+
+    // How long the tasks run (sometimes shown in minutes from day 6).
+    const tHours = n <= 2 ? randStep(1.5, 3, 0.5) : n <= 5 ? randStep(2, 5, 0.5) : randStep(2, 6, 0.25);
+    const showMinutes = n >= 6 && Math.random() < 0.5;
+
+    const rate = n <= 3 ? randInt(20, 40) : randStep(18, 60, 0.5);
+
+    const sol = { n, tasks, R, tHours, showMinutes, rate };
+
+    // Set limits so the required tasks always fit, but doing everything often won't.
+    const mand = calculateTruth(sol, tasks.filter(t => t.req));
+    const all = calculateTruth(sol, tasks);
+    const lo = Math.ceil(mand.I + 0.5), hi = Math.floor(all.I - 0.5);
+    sol.fuse = hi >= lo ? randInt(lo, hi) : Math.ceil(all.I) + randInt(1, 3);
+    const eLo = mand.E * 1.1, eHi = Math.max(eLo * 1.08, all.E * 0.92);
+    sol.battery = Math.ceil((eLo + Math.random() * (eHi - eLo)) / 10) * 10;
+    return sol;
+  }
+
+  // Fixed, friendly numbers for the training day.
+  function trainingSol() {
+    return {
+      n: 0, R: 0.5, tHours: 2, showMinutes: false, rate: 30, fuse: 15, battery: 800,
+      tasks: [
+        { name: "Heaters",  desc: "Stop the rover's parts from freezing.", P: 60,  req: true, reward: 0, checked: false, showKW: false },
+        { name: "Computer", desc: "The rover's brain must stay switched on.", P: 36, req: true, reward: 0, checked: false, showKW: false },
+        { name: "Drive",    desc: "Drive to the next place to explore.",  P: 144, req: true, reward: 0, checked: false, showKW: false }
+      ]
+    };
+  }
+
+  /* ======================= THE PHYSICS (answer key) =======================
+       1. Total task power   P = add up the task powers                  (W)
+       2. Current            I = P ÷ V           [from P = IV]           (A)
+       3. Heat wasted        P_heat = I² × R     [P = I²R]               (W)
+       4. Total energy       E = (P + P_heat) × t  [from P = E/t]        (Wh)
+       5. Cost               cost = price × (E ÷ 1000)  [cost = unit cost × kWh]
+  ========================================================================= */
+  function calculateTruth(sol, scheduled) {
+    const P = scheduled.reduce((s, t) => s + t.P, 0);
+    const I = P / V;
+    const Ploss = I * I * sol.R;
+    const E = (P + Ploss) * sol.tHours;
+    const cost = sol.rate * (E / 1000);
+    return { P, I, Ploss, E, cost };
+  }
+
+  /* ======================= DRAWING THE SCREEN ======================= */
+  function renderTop() {
+    $("solNum").textContent = state.training ? "Training" : state.practice ? "Practice" : state.sol;
+    $("solOf").textContent = state.training || state.practice ? "" : "/ " + MAX_SOLS;
+    $("credits").textContent = fmt(state.credits, 1);
+    $("science").textContent = state.science;
+    const l = $("lives");
+    l.textContent = "■".repeat(state.lives) + "□".repeat(START_LIVES - state.lives);
+    l.classList.toggle("low", state.lives === 1);
+    l.setAttribute("aria-label", state.lives + " of " + START_LIVES + " lives left");
+  }
+
+  function renderSol() {
+    const s = today;
+    const rows = [
+      ["volt",    "Voltage",                  V + " V"],
+      ["fuse",    "Fuse limit (max current)", s.fuse + " A"],
+      ["battery", "Battery capacity",         s.battery + " Wh"],
+      ["resist",  "Wire resistance",          fmt(s.R) + " Ω"],
+      ["price",   "Energy price",             fmt(s.rate, 1) + " credits per kWh"]
+    ];
+    $("telemetry").innerHTML = rows.map(r => `<dt data-k="${r[0]}">${r[1]}</dt><dd data-k="${r[0]}">${r[2]}</dd>`).join("");
+
+    $("weather").textContent = s.R < 0.3 ? "Clear skies. The wires are clean."
+                            : s.R < 0.6 ? "A little dust on the wires."
+                            : s.R < 1.0 ? "Dust storm. The wires are getting dusty."
+                            : "Big dust storm. The wires are very dusty.";
+    document.documentElement.style.setProperty("--dust", Math.min(0.9, 0.08 + s.R * 0.55).toFixed(2));
+
+    $("window").textContent = s.showMinutes ? Math.round(s.tHours * 60) + " minutes" : fmt(s.tHours) + " hours";
+
+    $("taskList").innerHTML = s.tasks.map((t, i) => {
+      const pw = t.showKW ? fmt(t.P / 1000, 3) + " kW" : t.P + " W";
+      const control = t.req ? `<span class="lock" aria-hidden="true">■</span>` : `<input type="checkbox" id="task${i}" data-i="${i}">`;
+      const tag = t.req
+        ? `<span class="tag req">Must run${t.reward ? " · +" + t.reward + " credits" : ""}</span>`
+        : `<span class="tag rew">Extra · +${t.reward} credits</span>`;
+      const inner = `${control}<span class="name">${t.name}</span><span class="pw">${pw}</span><span class="desc">${t.desc}</span>${tag}`;
+      return `<li class="task${t.req ? " req" : ""}">${t.req ? inner : `<label for="task${i}">${inner}</label>`}</li>`;
+    }).join("");
+    $("taskList").querySelectorAll("input[type=checkbox]").forEach(cb => {
+      cb.addEventListener("change", e => { today.tasks[+e.target.dataset.i].checked = e.target.checked; });
+    });
+
+    ["inI", "inLoss", "inE", "inCost"].forEach(id => { $(id).value = ""; });
+    renderTop();
+  }
+
+  /* ======================= MISSION LOG ======================= */
+  function log(msg, cls = "sys") {
+    const c = $("console");
+    const p = document.createElement("p");
+    p.className = cls;
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = state.training ? "[Training] " : state.practice ? "[Practice] " : `[Day ${state.sol}] `;
+    p.appendChild(t);
+    p.appendChild(document.createTextNode(msg));
+    c.appendChild(p);
+    c.scrollTop = c.scrollHeight;
+  }
+
+  /* ======================= READING ANSWERS ======================= */
+  function parseNumber(rawIn) {
+    let raw = String(rawIn).trim().replace(/\s/g, "");
+    if (raw.includes(",") && !raw.includes(".")) raw = raw.replace(",", ".");
+    if (raw === "" || !/^-?\d*\.?\d+(e-?\d+)?$/i.test(raw)) return NaN;
+    return parseFloat(raw);
+  }
+  // Correct if within ±2% of the true value.
+  function withinTolerance(answer, truth) {
+    return Math.abs(answer - truth) <= TOLERANCE * Math.abs(truth) + 1e-9;
+  }
+
+  /* =====================================================================
+     TRAINING DAY — guided, one step at a time
+     Each step shows the formula, says where the numbers come from,
+     highlights them on screen, gives instant feedback, a hint button,
+     and shows the full working after two wrong tries.
+     Help fades a little as the steps go on.
+  ===================================================================== */
+  const TUT_STEPS = [
+    {
+      title: "Add up the power",
+      text: "Each task needs power, measured in watts (W). All three tasks run at the same time, so add their powers together.",
+      formula: "Total power = 60 + 36 + 144",
+      unit: "W", answer: 240, glow: ["tasks"],
+      hint: "Look at the task list in the middle. Add the three numbers on the right.",
+      working: "60 + 36 + 144 = 240 W"
+    },
+    {
+      title: "Work out the current",
+      text: "Current is how much electricity flows through the wires, measured in amps (A). Power = current × voltage, so current = power ÷ voltage.",
+      formula: "I = P ÷ V = 240 ÷ 24",
+      unit: "A", answer: 10, glow: ["volt"],
+      hint: "Divide your total power (240 W) by the voltage (24 V).",
+      working: "240 ÷ 24 = 10 A",
+      mistakes: [[5760, "You multiplied. Current = power ÷ voltage, so divide."]]
+    },
+    {
+      type: "choice",
+      title: "Will the fuse blow?",
+      text: "The fuse protects the rover. If the current is bigger than the fuse limit, it blows and the rover stops.",
+      formula: "Your current: 10 A     Fuse limit: 15 A",
+      glow: ["fuse"],
+      question: "Is the current safe?",
+      options: ["Yes. 10 A is less than 15 A.", "No. 10 A is too much."],
+      correct: 0,
+      explainWrong: "10 is smaller than 15, so the fuse is fine. It only blows if the current is bigger than the limit."
+    },
+    {
+      title: "Power wasted as heat",
+      text: "Dusty wires get hot, and that heat wastes power. To find it, multiply the current by itself, then multiply by the wire resistance.",
+      formula: "P = I² × R = 10 × 10 × 0.5",
+      unit: "W", answer: 50, glow: ["resist"],
+      hint: "I² means I × I. So 10 × 10 = 100. Now multiply 100 by 0.5.",
+      working: "10 × 10 = 100, then 100 × 0.5 = 50 W",
+      mistakes: [[5, "That's 10 × 0.5. The current needs to be squared first (10 × 10)."], [10, "You squared 0.5 instead of the current. Square the current: 10 × 10."]]
+    },
+    {
+      title: "Total power from the battery",
+      text: "The battery has to supply the tasks AND the wasted heat. Add them together.",
+      formula: "Total power = task power + heat = ? + ?",
+      unit: "W", answer: 290, glow: [],
+      hint: "Task power was your answer to step 1. Heat was your answer to step 4.",
+      working: "240 + 50 = 290 W",
+      mistakes: [[240, "That's just the tasks. Don't forget to add the wasted heat."]]
+    },
+    {
+      title: "Total energy for the day",
+      text: "Energy is power used over time. Power = energy ÷ time, so energy = power × time. Watts × hours gives watt-hours (Wh).",
+      formula: "E = P × t",
+      unit: "Wh", answer: 580, glow: ["window"],
+      hint: "Use your total power from the last step. The time is shown above the task list.",
+      working: "290 × 2 = 580 Wh",
+      mistakes: [[480, "You used 240 W. Use the total power including heat (290 W)."], [145, "You divided. Energy = power × time, so multiply."]]
+    },
+    {
+      type: "choice",
+      title: "Is there enough battery?",
+      text: "If the energy needed is bigger than the battery capacity, the battery runs flat.",
+      formula: "Energy needed: 580 Wh     Battery capacity: 800 Wh",
+      glow: ["battery"],
+      question: "Is there enough battery?",
+      options: ["No. The battery will run flat.", "Yes. 580 Wh is less than 800 Wh."],
+      correct: 1,
+      explainWrong: "580 is smaller than 800, so the battery has enough energy."
+    },
+    {
+      title: "Change Wh into kWh",
+      text: "Energy prices are given per kWh (kilowatt-hour). 1 kWh = 1000 Wh, so divide by 1000.",
+      formula: "kWh = Wh ÷ 1000",
+      unit: "kWh", answer: 0.58, glow: [],
+      hint: "Take your energy in Wh (580) and divide by 1000.",
+      working: "580 ÷ 1000 = 0.58 kWh",
+      mistakes: [[580000, "You multiplied. To turn Wh into kWh, divide by 1000."]]
+    },
+    {
+      title: "Work out the cost",
+      text: "Cost = price for each kWh × number of kWh.",
+      formula: "Cost = price × kWh",
+      unit: "credits", answer: 17.4, glow: ["price"],
+      hint: "Find the energy price in today's conditions. Multiply it by your kWh answer.",
+      working: "30 × 0.58 = 17.4 credits",
+      mistakes: [[17400, "You used Wh instead of kWh. Use 0.58 kWh."]]
+    }
+  ];
+
+  let tutIndex = 0, tutWrong = 0;
+
+  /* ======================= 3D CUT-SCENES ======================= */
+  let busy = false;   // blocks double-clicks while a cut-scene plays
+  async function showScene(opts) {
+    if (!window.RoverScene) return;
+    try { await window.RoverScene.play(opts); } catch (e) { console.warn(e); }
+  }
+
+  function clearGlow() { document.querySelectorAll(".glow").forEach(el => el.classList.remove("glow")); }
+
+  function applyGlow(keys) {
+    clearGlow();
+    keys.forEach(k => {
+      if (k === "tasks") document.querySelectorAll("#taskList .pw").forEach(el => el.classList.add("glow"));
+      else if (k === "window") $("windowBox").classList.add("glow");
+      else document.querySelectorAll(`#telemetry [data-k="${k}"]`).forEach(el => el.classList.add("glow"));
+    });
+  }
+
+  function setFeedback(msg, cls) {
+    const f = $("tutFeedback");
+    f.className = "tut-feedback " + (cls || "");
+    f.textContent = msg;
+  }
+
+  function renderTutStep() {
+    const s = TUT_STEPS[tutIndex];
+    tutWrong = 0;
+    $("tutProgress").innerHTML = TUT_STEPS.map((_, i) =>
+      `<span class="${i < tutIndex ? "done" : i === tutIndex ? "now" : ""}"></span>`).join("");
+    $("tutTitle").textContent = `Step ${tutIndex + 1} of ${TUT_STEPS.length}: ${s.title}`;
+    $("tutText").textContent = s.text;
+    $("tutFormula").textContent = s.formula;
+    setFeedback("", "");
+    applyGlow(s.glow);
+
+    const area = $("tutAnswerArea");
+    if (s.type === "choice") {
+      area.innerHTML = `<p class="tut-text">${s.question}</p><div class="choices">` +
+        s.options.map((o, i) => `<button type="button" data-i="${i}">${o}</button>`).join("") + `</div>`;
+      area.querySelectorAll(".choices button").forEach(b => b.addEventListener("click", () => {
+        if (+b.dataset.i === s.correct) tutCorrect();
+        else setFeedback(s.explainWrong + " Try again.", "bad");
+      }));
+    } else {
+      area.innerHTML = `
+        <div class="tut-input">
+          <input id="tutIn" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Your answer">
+          <span class="unit">${s.unit}</span>
+        </div>
+        <div class="tut-buttons">
+          <button type="button" id="tutCheck">Check my answer</button>
+          <button type="button" id="tutHint" class="ghost">Give me a hint</button>
+        </div>`;
+      $("tutCheck").addEventListener("click", tutCheck);
+      $("tutHint").addEventListener("click", () => setFeedback("Hint: " + s.hint, "help"));
+      $("tutIn").addEventListener("keydown", e => { if (e.key === "Enter") tutCheck(); });
+      $("tutIn").focus({ preventScroll: true });
+    }
+  }
+
+  function tutCheck() {
+    const s = TUT_STEPS[tutIndex];
+    const v = parseNumber($("tutIn").value);
+    if (Number.isNaN(v)) { setFeedback("Type a number first.", "help"); return; }
+    if (withinTolerance(v, s.answer)) return tutCorrect();
+
+    tutWrong++;
+    const known = (s.mistakes || []).find(m => withinTolerance(v, m[0]));
+    let msg = known ? known[1] : "Not quite. Check your working and try again.";
+    if (tutWrong >= 2) msg += ` Here's the working: ${s.working}. Type it in to carry on.`;
+    setFeedback(msg, "bad");
+  }
+
+  function tutCorrect() {
+    const s = TUT_STEPS[tutIndex];
+    setFeedback("Correct!" + (s.working ? " " + s.working + "." : ""), "good");
+    log(`Step ${tutIndex + 1} done: ${s.title}.`, "ok");
+    const area = $("tutAnswerArea");
+    area.innerHTML = `<div class="tut-buttons"><button type="button" id="tutNext">${tutIndex + 1 < TUT_STEPS.length ? "Next step" : "Finish training"}</button></div>`;
+    $("tutNext").addEventListener("click", () => {
+      tutIndex++;
+      if (tutIndex < TUT_STEPS.length) renderTutStep();
+      else finishTraining();
+    });
+    $("tutNext").focus({ preventScroll: true });
+  }
+
+  function startTraining() {
+    state = { sol: 0, credits: START_CREDITS, lives: START_LIVES, science: 0, over: false, training: true };
+    $("console").innerHTML = "";
+    today = trainingSol();
+    renderSol();
+    $("taskNote").textContent = "Training day: all three tasks must run, at the same time.";
+    $("missionBox").hidden = true;
+    $("tutorialBox").hidden = false;
+    tutIndex = 0;
+    renderTutStep();
+    log("Training started. Follow the steps on the right.", "sys");
+  }
+
+  async function finishTraining() {
+    clearGlow();
+    $("tutorialBox").hidden = true;
+    await showScene({
+      outcome: "success", R: today.R, names: today.tasks.map(t => t.name),
+      title: "Training day complete",
+      sub: "Your numbers were right, so the rover sets off safely.",
+      lines: ["Current 10 A (fuse limit 15 A). Energy 580 Wh (battery 800 Wh). Cost 17.4 credits."],
+      continueLabel: "Continue"
+    });
+    $("endH").textContent = "Training complete";
+    $("endBody").innerHTML = `
+      <p>Well done. Next is a <b>practice day</b>. This time you fill in just four boxes: <b>current</b>, <b>power wasted as heat</b>, <b>total energy</b> and <b>cost</b>.</p>
+      <p>The in-between steps (adding up power, adding the heat, changing Wh to kWh) you do on paper.</p>
+      <p>The formula for each box is shown underneath it, and mistakes don't cost lives.</p>`;
+    endAction = startPractice;
+    $("restartBtn").textContent = "Start practice day";
+    $("endScreen").hidden = false;
+    $("restartBtn").focus();
+  }
+
+  /* =====================================================================
+     PRACTICE DAY — in between training and the mission
+     Random numbers like day 1. Formula hints under each box.
+     "Check my answers" marks each box separately, gives a nudge for
+     common slips, and shows the working after two wrong tries on a box.
+     Fuse and battery problems are explained, never punished.
+  ===================================================================== */
+  const FIELDS = ["inI", "inLoss", "inE", "inCost"];
+  let practiceTries = {};
+
+  function setPracticeMode(on) {
+    $("missionBox").classList.toggle("practice", on);
+    $("execBtn").textContent = on ? "Check my answers" : "Run the plan";
+    FIELDS.forEach(id => { const f = $("fb-" + id); f.textContent = ""; f.className = "ffb"; });
+  }
+
+  function startPractice() {
+    clearGlow();
+    state = { sol: 1, credits: START_CREDITS, lives: START_LIVES, science: 0, over: false, training: false, practice: true };
+    $("console").innerHTML = "";
+    $("tutorialBox").hidden = true;
+    $("missionBox").hidden = false;
+    today = generateSol(1);
+    renderSol();
+    setPracticeMode(true);
+    practiceTries = {};
+    $("taskNote").textContent = "Practice day: all the tasks you choose run at the same time. Required tasks must run. Tick extra tasks if you like, but check they fit the fuse and battery.";
+    // Changing the tasks changes the answers, so clear old marks.
+    $("taskList").querySelectorAll("input[type=checkbox]").forEach(cb => cb.addEventListener("change", () => {
+      practiceTries = {};
+      FIELDS.forEach(id => { $("fb-" + id).textContent = ""; $("fb-" + id).className = "ffb"; });
+    }));
+    log("Practice day started. Fill in the four boxes, then check your answers. No lives can be lost.", "sys");
+    $("inI").focus({ preventScroll: true });
+  }
+
+  function markField(id, ok, msg) {
+    const f = $("fb-" + id);
+    f.className = "ffb " + (ok ? "good" : "bad");
+    f.textContent = (ok ? "✓ " : "✗ ") + msg;
+  }
+
+  async function practiceCheck() {
+    const scheduled = today.tasks.filter(t => t.req || t.checked);
+    const tr = calculateTruth(today, scheduled);
+    const hrs = today.tHours;
+    const working = {
+      inI: `${scheduled.map(t => t.P).join(" + ")} = ${fmt(tr.P)} W, then ${fmt(tr.P)} ÷ ${V} = ${fmt(tr.I)} A`,
+      inLoss: `${fmt(tr.I)} × ${fmt(tr.I)} × ${fmt(today.R)} = ${fmt(tr.Ploss)} W`,
+      inE: `(${fmt(tr.P)} + ${fmt(tr.Ploss)}) × ${fmt(hrs)} = ${fmt(tr.E)} Wh`,
+      inCost: `${fmt(tr.E)} ÷ 1000 = ${fmt(tr.E / 1000, 4)} kWh, then × ${fmt(today.rate, 1)} = ${fmt(tr.cost)} credits`
+    };
+    const truthOf = { inI: tr.I, inLoss: tr.Ploss, inE: tr.E, inCost: tr.cost };
+    let allRight = true;
+
+    FIELDS.forEach(id => {
+      const v = parseNumber($(id).value);
+      if (Number.isNaN(v)) { allRight = false; markField(id, false, "Type a number in this box."); return; }
+      if (withinTolerance(v, truthOf[id])) { markField(id, true, "Correct!"); return; }
+
+      allRight = false;
+      practiceTries[id] = (practiceTries[id] || 0) + 1;
+      let msg = "Not quite. Check your working.";
+      // Nudges for common slips
+      if (id === "inI" && withinTolerance(v, tr.P * V)) msg = "You multiplied. Current = power ÷ voltage.";
+      if (id === "inI" && withinTolerance(v, today.tasks.filter(t => t.req).reduce((a, t) => a + t.P, 0) / V) && scheduled.some(t => !t.req))
+        msg = "Did you include the extra tasks you ticked?";
+      if (id === "inLoss" && withinTolerance(v, tr.I * today.R)) msg = "That's current × resistance. Square the current first (I × I).";
+      if (id === "inE" && withinTolerance(v, tr.P * hrs)) msg = "Did you forget to add the power wasted as heat?";
+      if (id === "inE" && withinTolerance(v, (tr.P + tr.Ploss) / hrs)) msg = "You divided. Energy = power × time.";
+      if (id === "inCost" && withinTolerance(v, tr.cost * 1000)) msg = "Did you change Wh into kWh (÷ 1000)?";
+      if (practiceTries[id] >= 2) msg += " Working: " + working[id] + ".";
+      markField(id, false, msg);
+    });
+
+    if (!allRight) { log("Some answers need another look. Read the notes under the boxes.", "warn"); return; }
+
+    // Numbers are right. Now does the plan fit?
+    if (tr.I > today.fuse) {
+      log(`Your numbers are all right, but ${fmt(tr.I)} A is more than the ${today.fuse} A fuse limit. The fuse would blow! Untick a task and work the numbers out again.`, "warn");
+      return;
+    }
+    if (tr.E > today.battery) {
+      log(`Your numbers are all right, but ${fmt(tr.E)} Wh is more than the ${today.battery} Wh battery. It would run flat! Untick a task and work the numbers out again.`, "warn");
+      return;
+    }
+
+    log("All four answers correct, and the plan is safe. Practice complete!", "ok");
+    busy = true;
+    await showScene({
+      outcome: "success", R: today.R, names: scheduled.map(t => t.name),
+      title: "Practice day complete",
+      sub: "You worked out every number yourself.",
+      lines: [`Current ${fmt(tr.I)} A (fuse limit ${today.fuse} A). Energy ${fmt(tr.E)} Wh (battery ${today.battery} Wh).`],
+      continueLabel: "Continue"
+    });
+    busy = false;
+    $("endH").textContent = "Ready for the real mission";
+    $("endBody").innerHTML = `
+      <p>In the real mission:</p>
+      <ul>
+        <li>The formulas are <b>not</b> shown under the boxes. If you get stuck, open the <b>Help book</b> on the left.</li>
+        <li>You only find out if you're right after you press <b>Run the plan</b>.</li>
+        <li>Each mistake costs a life, and the numbers change after every mistake.</li>
+        <li>Check for yourself that the current is under the fuse limit and the energy is under the battery capacity.</li>
+      </ul>`;
+    endAction = newMission;
+    $("restartBtn").textContent = "Start the mission";
+    $("endScreen").hidden = false;
+    $("restartBtn").focus();
+  }
+
+  /* ======================= MISSION: RUN THE PLAN ======================= */
+  async function executePlan() {
+    if (state.over || state.training || busy) return;
+    if (state.practice) return practiceCheck();
+
+    const labels = { inI: "Current", inLoss: "Power wasted as heat", inE: "Total energy needed", inCost: "Cost" };
+    const ans = {};
+    for (const id of Object.keys(labels)) {
+      ans[id] = parseNumber($(id).value);
+      if (Number.isNaN(ans[id])) {
+        log(`"${labels[id]}" is empty or isn't a number. Fill it in to run the plan. No life lost.`, "warn");
+        $(id).focus();
+        return;
+      }
+    }
+
+    const scheduled = today.tasks.filter(t => t.req || t.checked);
+    const truth = calculateTruth(today, scheduled);
+    const errors = [];
+
+    // ---- Check 1: current, from P = IV ----
+    if (!withinTolerance(ans.inI, truth.I)) {
+      errors.push(`Current is wrong. You worked out ${fmt(ans.inI)} A, but the real current was ${fmt(truth.I)} A. Check your P = IV working.`);
+    }
+    // ---- Check 2: heat wasted, from P = I²R ----
+    if (!withinTolerance(ans.inLoss, truth.Ploss)) {
+      errors.push(`Heat is wrong. You worked out ${fmt(ans.inLoss)} W, but ${fmt(truth.Ploss)} W was wasted as heat. Check your P = I²R working.`);
+    }
+    // ---- Check 3: total energy, from P = E/t ----
+    if (!withinTolerance(ans.inE, truth.E)) {
+      let msg = `Energy is wrong. You worked out ${fmt(ans.inE)} Wh, but the day needed ${fmt(truth.E)} Wh. Check your P = E/t working.`;
+      if (withinTolerance(ans.inE, truth.P * today.tHours)) msg += " Did you forget to add the wasted heat?";
+      else if (today.showMinutes && withinTolerance(ans.inE, (truth.P + truth.Ploss) * today.tHours * 60)) msg += " Did you change minutes into hours?";
+      errors.push(msg);
+    }
+    // ---- Check 4: cost = price × kWh ----
+    if (!withinTolerance(ans.inCost, truth.cost)) {
+      let msg = `Cost is wrong. You worked out ${fmt(ans.inCost)} credits, but it cost ${fmt(truth.cost)} credits. Check your cost = price × kWh working.`;
+      if (withinTolerance(ans.inCost, truth.cost * 1000)) msg += " Did you change Wh into kWh?";
+      errors.push(msg);
+    }
+
+    if (errors.length) {
+      log("Mission failed! The rover's computer found mistakes in your plan.", "err");
+      errors.forEach(e => log(e, "err"));
+      if (errors.length > 1) log("One mistake can cause the next ones. Fix the first one first.", "warn");
+      busy = true;
+      await showScene({
+        outcome: "error", R: today.R, names: scheduled.map(t => t.name),
+        title: `Day ${state.sol}: mission failed`,
+        sub: "The rover's computer found mistakes in your numbers and stopped the rover.",
+        lines: [`${errors.length} of your 4 answers ${errors.length === 1 ? "was" : "were"} wrong. The mission log shows which ones.`],
+        continueLabel: "Back to the plan"
+      });
+      busy = false;
+      return failure();
+    }
+
+    // ---- The maths is right — but is the plan safe? ----
+    if (truth.I > today.fuse) {
+      log(`Fuse blown! Your maths was right, but ${fmt(truth.I)} A is more than the ${today.fuse} A fuse limit. Choose fewer tasks.`, "err");
+      busy = true;
+      await showScene({
+        outcome: "fuse", R: today.R, names: scheduled.map(t => t.name),
+        title: `Day ${state.sol}: fuse blown!`,
+        sub: "Too much current flowed through the wires.",
+        lines: [`Current ${fmt(truth.I)} A, but the fuse limit was ${today.fuse} A.`, "Your maths was right. Next time, choose fewer tasks."],
+        continueLabel: "Back to the plan"
+      });
+      busy = false;
+      return failure();
+    }
+    if (truth.E > today.battery) {
+      log(`Battery ran flat! Your maths was right, but ${fmt(truth.E)} Wh is more than the ${today.battery} Wh battery. Choose fewer tasks.`, "err");
+      busy = true;
+      await showScene({
+        outcome: "battery", R: today.R, names: scheduled.map(t => t.name),
+        title: `Day ${state.sol}: battery flat!`,
+        sub: "The rover ran out of energy before the tasks were finished.",
+        lines: [`Energy needed ${fmt(truth.E)} Wh, but the battery only holds ${today.battery} Wh.`, "Your maths was right. Next time, choose fewer tasks."],
+        continueLabel: "Back to the plan"
+      });
+      busy = false;
+      return failure();
+    }
+
+    // ---- Success ----
+    const reward = scheduled.reduce((s, t) => s + t.reward, 0);
+    state.credits = +(state.credits + reward - truth.cost).toFixed(2);
+    state.science += scheduled.filter(t => t.reward > 0).length;
+    log(`Success! Earned ${reward} credits, spent ${fmt(truth.cost)}. ${fmt(today.battery - truth.E)} Wh left in the battery.`, "ok");
+    renderTop();
+    busy = true;
+    const lastDay = state.sol >= MAX_SOLS || state.credits < 0;
+    await showScene({
+      outcome: "success", R: today.R, names: scheduled.map(t => t.name),
+      title: `Day ${state.sol} complete`,
+      sub: "Tasks: " + scheduled.map(t => t.name).join(", ") + ".",
+      lines: [`Earned ${reward} credits, spent ${fmt(truth.cost)} on energy.`, `${fmt(today.battery - truth.E)} Wh left in the battery.`],
+      continueLabel: lastDay ? "See mission report" : `Start day ${state.sol + 1}`
+    });
+    busy = false;
+
+    if (state.credits < 0) { renderTop(); return endGame(false, "You ran out of credits. The energy cost more than the science earned."); }
+    if (state.sol >= MAX_SOLS) { renderTop(); return endGame(true); }
+    state.sol++;
+    today = generateSol(state.sol);
+    renderSol();
+    log("A new day on Mars. The numbers have changed.", "sys");
+  }
+
+  function failure() {
+    state.lives--;
+    renderTop();
+    if (state.lives <= 0) return endGame(false, "No lives left. Mission control has ended the mission.");
+    today = generateSol(state.sol);
+    renderSol();
+    log("The rover has reset with new numbers. Try this day again.", "warn");
+  }
+
+  /* ======================= END / RESTART ======================= */
+  function endGame(won, reason) {
+    state.over = true;
+    $("endH").textContent = won ? "Mission complete!" : "Mission over";
+    const daysDone = won ? MAX_SOLS : state.sol - 1;
+    $("endBody").innerHTML = `
+      <p>${reason || `The rover survived all ${MAX_SOLS} days.`}</p>
+      <p>Days completed: <b>${daysDone}</b><br>
+         Credits: <b>${fmt(state.credits, 1)}</b><br>
+         Science tasks done: <b>${state.science}</b><br>
+         Lives left: <b>${state.lives} / ${START_LIVES}</b></p>`;
+    endAction = newMission;
+    $("restartBtn").textContent = "Start a new mission";
+    $("endScreen").hidden = false;
+    $("restartBtn").focus();
+  }
+
+  function newMission() {
+    clearGlow();
+    state = { sol: 1, credits: START_CREDITS, lives: START_LIVES, science: 0, over: false, training: false, practice: false };
+    $("console").innerHTML = "";
+    $("tutorialBox").hidden = true;
+    $("missionBox").hidden = false;
+    setPracticeMode(false);
+    $("taskNote").textContent = "All the tasks you choose run at the same time. Required tasks must run. Tick any extra tasks you want to do for bonus credits.";
+    today = generateSol(1);
+    renderSol();
+    log("Mission started. Work out your four numbers, then run the plan.", "sys");
+  }
+
+  /* ======================= BUTTONS ======================= */
+  $("execBtn").addEventListener("click", executePlan);
+  $("trainBtn").addEventListener("click", () => { $("briefing").hidden = true; startTraining(); });
+  $("skipBtn").addEventListener("click", () => { $("briefing").hidden = true; newMission(); $("inI").focus(); });
+  let endAction = newMission;   // what the main button on the pop-up does next
+  $("restartBtn").addEventListener("click", () => { $("endScreen").hidden = true; endAction(); });
+  $("practiceBtn").addEventListener("click", () => { $("briefing").hidden = true; startPractice(); });
+  $("repracticeBtn").addEventListener("click", () => { $("endScreen").hidden = true; startPractice(); });
+  $("retrainBtn").addEventListener("click", () => { $("endScreen").hidden = true; startTraining(); });
+
+  // Background screen while the welcome message is showing.
+  state = { sol: 1, credits: START_CREDITS, lives: START_LIVES, science: 0, over: false, training: false };
+  today = generateSol(1);
+  renderSol();
+})();

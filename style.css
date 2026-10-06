@@ -1,0 +1,215 @@
+  /* ---------- Palette: Martian night, amber screen, rust alarms ---------- */
+  :root {
+    --night: #170d08;
+    --panel: rgba(34, 20, 13, 0.94);
+    --rule: #5a3520;
+    --amber: #f0b35b;
+    --dim: #a5784b;
+    --rust: #d2552e;
+    --alarm: #ff6b4a;
+    --ok: #86d4c4;
+    --dust: 0.15;               /* set from wire resistance each Sol */
+    --font: "IBM Plex Mono", ui-monospace, Menlo, Consolas, "Courier New", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: var(--night);
+    color: var(--amber);
+    font: 15px/1.5 var(--font);
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+             env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+    overflow-x: hidden;
+  }
+  /* Dust layer: thicker when the wires are dustier */
+  body::before {
+    content: "";
+    position: fixed; inset: -50%; pointer-events: none; z-index: 0;
+    background-image:
+      radial-gradient(rgba(210, 85, 46, 0.6) 1px, transparent 1.5px),
+      radial-gradient(rgba(240, 179, 91, 0.35) 1px, transparent 1.3px);
+    background-size: 7px 9px, 13px 11px;
+    background-position: 0 0, 3px 5px;
+    opacity: var(--dust);
+    transition: opacity 1.2s ease;
+    animation: drift 45s linear infinite;
+  }
+  @keyframes drift { to { transform: translate(12%, 4%); } }
+
+  .app {
+    position: relative; z-index: 1;
+    max-width: 1400px; margin: 0 auto; padding: 12px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+
+  /* ---------- Top bar ---------- */
+  header.bar {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 28px;
+    border: 1px solid var(--rule); background: var(--panel); padding: 10px 14px;
+  }
+  header.bar h1 { font-size: 1.05rem; font-weight: 600; margin: 0 auto 0 0; }
+  .stat { display: flex; gap: 8px; align-items: baseline; }
+  .stat .k { color: var(--dim); }
+  .stat .v { font-size: 1.2rem; font-weight: 600; }
+  #lives { letter-spacing: 3px; }
+  #lives.low { color: var(--alarm); }
+
+  /* ---------- Three panels ---------- */
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 1.2fr);
+    gap: 12px;
+  }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+
+  .panel { border: 1px solid var(--rule); background: var(--panel); padding: 12px 14px 14px; }
+  .panel h2 {
+    font-size: 0.95rem; font-weight: 600; margin: 0 0 10px;
+    padding-bottom: 6px; border-bottom: 1px dashed var(--rule);
+  }
+  .panel h2::before { content: "> "; color: var(--rust); }
+
+  dl.tele { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; }
+  dl.tele dt { color: var(--dim); }
+  dl.tele dd { margin: 0; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .weather { margin-top: 12px; padding: 8px 10px; border-left: 3px solid var(--rust); }
+
+  details.manual { margin-top: 16px; border-top: 1px dashed var(--rule); padding-top: 10px; }
+  details.manual summary { cursor: pointer; color: var(--dim); }
+  details.manual summary:hover { color: var(--amber); }
+  details.manual table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.9rem; }
+  details.manual td { padding: 4px 6px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  details.manual td:first-child { white-space: nowrap; font-weight: 600; }
+
+  /* Training highlight: shows the student where a number comes from */
+  .glow { outline: 2px solid var(--ok); outline-offset: 2px; color: var(--ok) !important; }
+
+  /* ---------- Tasks ---------- */
+  .window { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+            padding: 8px 10px; border: 1px solid var(--rule); margin-bottom: 10px; }
+  .window b { font-size: 1.1rem; }
+  .note { color: var(--dim); font-size: 0.88rem; margin: 0 0 10px; }
+  ul.tasks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .task {
+    display: grid; grid-template-columns: 26px 1fr auto; gap: 4px 10px; align-items: start;
+    padding: 9px 10px; border: 1px solid var(--rule);
+  }
+  .task.req { border-color: var(--rust); }
+  .task label { display: contents; cursor: pointer; }
+  .task input[type=checkbox] { width: 20px; height: 20px; margin: 2px 0 0; accent-color: var(--rust); cursor: pointer; }
+  .task .lock { width: 20px; text-align: center; color: var(--rust); }
+  .task .name { font-weight: 600; }
+  .task .desc { grid-column: 2 / 4; color: var(--dim); font-size: 0.88rem; }
+  .task .pw { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .task .tag { grid-column: 2 / 4; font-size: 0.85rem; }
+  .task .tag.req { color: var(--rust); }
+  .task .tag.rew { color: var(--ok); }
+
+  /* ---------- Inputs ---------- */
+  .field { display: grid; grid-template-columns: 1fr minmax(90px, 140px) 64px; gap: 8px; align-items: center; margin-bottom: 9px; }
+  .field input, .tut-input input {
+    width: 100%; font: inherit; font-size: 1rem; color: var(--amber);
+    background: #0e0805; border: 1px solid var(--rule); padding: 8px; text-align: right; border-radius: 0;
+  }
+  .field input:focus, .tut-input input:focus { outline: 2px solid var(--amber); outline-offset: 1px; }
+  .field .unit, .tut-input .unit { color: var(--dim); }
+  /* Practice-day helpers under each box (hidden in the real mission) */
+  .fhint, .ffb { grid-column: 1 / -1; font-size: 0.86rem; margin-top: -2px; }
+  .fhint { display: none; color: var(--ok); border-left: 2px dashed var(--ok); padding-left: 8px; }
+  #missionBox.practice .fhint { display: block; }
+  .ffb:empty { display: none; }
+  .ffb.good { color: var(--ok); }
+  .ffb.bad { color: var(--alarm); }
+  .practice-banner { display: none; margin: 0 0 10px; padding: 8px 10px; border: 1px dashed var(--ok); color: var(--ok); font-size: 0.9rem; }
+  #missionBox.practice .practice-banner { display: block; }
+  @media (max-width: 420px) {
+    .field { grid-template-columns: 1fr 64px; }
+    .field label { grid-column: 1 / 3; }
+  }
+
+  button {
+    font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--rust); color: #170d08; border: 0; padding: 11px 16px;
+  }
+  button:hover { background: var(--amber); }
+  button:focus-visible, summary:focus-visible, input:focus-visible { outline: 2px solid var(--ok); outline-offset: 2px; }
+  button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--rule); }
+  button.ghost:hover { color: var(--amber); border-color: var(--amber); }
+  #execBtn { width: 100%; margin-top: 4px; font-size: 1.05rem; }
+
+  /* ---------- Training panel ---------- */
+  .progress { display: flex; gap: 4px; margin-bottom: 12px; }
+  .progress span { flex: 1; height: 6px; background: var(--rule); }
+  .progress span.done { background: var(--ok); }
+  .progress span.now { background: var(--amber); }
+  .tut-title { font-weight: 600; font-size: 1.05rem; margin: 0 0 6px; }
+  .tut-text { margin: 0 0 10px; }
+  .formula {
+    padding: 10px 12px; margin: 0 0 12px; border: 1px dashed var(--ok); color: var(--ok);
+    font-size: 1.05rem; font-variant-numeric: tabular-nums;
+  }
+  .tut-input { display: grid; grid-template-columns: 1fr 60px; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .tut-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+  .tut-buttons button { flex: 1 1 auto; }
+  .choices { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+  .choices button { text-align: left; background: transparent; color: var(--amber); border: 1px solid var(--rule); }
+  .choices button:hover { border-color: var(--amber); background: rgba(240,179,91,0.08); }
+  .tut-feedback { margin-top: 10px; padding: 8px 10px; border-left: 3px solid var(--rule); min-height: 1em; }
+  .tut-feedback:empty { display: none; }
+  .tut-feedback.good { border-color: var(--ok); color: var(--ok); }
+  .tut-feedback.bad { border-color: var(--alarm); color: var(--alarm); }
+  .tut-feedback.help { border-color: var(--amber); color: var(--amber); }
+
+  #console {
+    margin-top: 12px; height: 260px; overflow-y: auto; background: #0e0805;
+    border: 1px solid var(--rule); padding: 8px 10px; font-size: 0.87rem; line-height: 1.45;
+  }
+  #console p { margin: 0 0 6px; }
+  #console .t { color: var(--dim); }
+  #console .err { color: var(--alarm); }
+  #console .ok { color: var(--ok); }
+  #console .warn { color: var(--amber); }
+  #console .sys { color: var(--dim); }
+
+  /* ---------- Pop-up screens ---------- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 10; background: rgba(10, 5, 3, 0.86);
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  .overlay[hidden] { display: none; }
+  .sheet {
+    max-width: 620px; width: 100%; max-height: 90vh; overflow-y: auto;
+    background: #1e110b; border: 1px solid var(--rust); padding: 18px 20px;
+  }
+  .sheet h2 { margin: 0 0 10px; font-size: 1.15rem; }
+  .sheet ul { padding-left: 20px; }
+  .sheet .dim { color: var(--dim); }
+  .sheet .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+
+  /* ---------- 3D interstitial between days ---------- */
+  #sceneOverlay { position: fixed; inset: 0; z-index: 30; background: #2a140a; }
+  #sceneOverlay[hidden] { display: none; }
+  #sceneCanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .scene-hud {
+    position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between;
+    padding: calc(16px + env(safe-area-inset-top, 0px)) 18px calc(16px + env(safe-area-inset-bottom, 0px));
+    pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+    background: linear-gradient(to bottom, rgba(20,8,4,0.55), transparent 28%);
+  }
+  .scene-hud button { pointer-events: auto; }
+  .scene-title { margin: 0; font-size: clamp(1.2rem, 4vw, 2rem); font-weight: 600; color: #fff1dc; }
+  .scene-sub { margin: 4px 0 0; color: #f6cf98; max-width: 60ch; }
+  .scene-bottom { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+  .scene-result {
+    background: rgba(23, 13, 8, 0.85); border: 1px solid var(--rust); padding: 10px 14px;
+    max-width: 560px; text-shadow: none;
+  }
+  .scene-result p { margin: 0 0 4px; }
+  .scene-result.good { border-color: var(--ok); }
+  .scene-result.bad { border-color: var(--alarm); }
+  .scene-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .scene-actions button.ghost { background: rgba(23, 13, 8, 0.8); color: var(--amber); border-color: var(--amber); }
+
+  @media (prefers-reduced-motion: reduce) {
+    body::before { animation: none; transition: none; }
+  }
